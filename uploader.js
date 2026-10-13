@@ -7,7 +7,7 @@ const Uploader = (() => {
   const EXT_OK = new Set(['jpg', 'jpeg', 'png', 'heic', 'heif', 'mp4', 'mov']);
   const SCOPE = 'https://www.googleapis.com/auth/drive.file';
   const UPLOAD_URL =
-    'https://drive.google.com/drive/u/0/folders/1seWvirzrzVDW-PPa4ijcKNBHmAQ7mHy5';
+    'https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable&supportsAllDrives=true&fields=id';
 
   const extOf = (name) => (String(name).split('.').pop() || '').toLowerCase();
 

@@ -35,8 +35,7 @@
   <h1>Share your photos &amp; videos</h1>
 
   <section id="welcome">
-    <textarea id="devkey" class="hidden" placeholder="DEV ONLY: paste the service account key"></textarea>
-    <button class="btn" id="pick">Upload</button>
+    <button class="btn" id="pick" disabled>Upload</button>
     <p class="note">Keep this page open until uploads finish.</p>
     <p class="note">By uploading, you agree your photos may be shared by the event organizer.</p>
   </section>
@@ -57,26 +56,26 @@
 </main>
 
 <script src="uploader.js"></script>
+<script src="credcrypto.js"></script>
 <script>
-// ---- Config (edit these two) ----
-const CONFIG = { folderId: 'PUT_EVENT_FOLDER_ID_HERE', eventName: 'oktoberfest' };
-
 const $ = (id) => document.getElementById(id);
 const params = new URLSearchParams(location.search);
-const DEV = params.get('dev') === '1';
-// Event code from the link; used in Phase 4 to decrypt the credential.
+// The event code in the link decrypts credential.enc.json (key, folder and event name live inside it).
 const EVENT_CODE = params.get('event') || '';
-
-// Phase 4 replaces this function (decrypt the embedded credential with EVENT_CODE).
-async function loadCredential() {
-  if (!DEV) throw new Error('no credential');
-  return JSON.parse($('devkey').value);
-}
 
 let client = null, items = [], running = false, wakeLock = null;
 
-if (DEV) $('devkey').classList.remove('hidden');
-else show('closed'); // until Phase 4 provides the credential
+async function init() {
+  try {
+    if (!EVENT_CODE) throw new Error('no code');
+    const r = await fetch('credential.enc.json', { cache: 'no-store' });
+    if (!r.ok) throw new Error('no credential file');
+    const cred = await CredCrypto.decrypt(await r.json(), EVENT_CODE);
+    client = Uploader.createClient({ credential: cred, folderId: cred.folderId, eventName: cred.eventName || 'event' });
+    $('pick').disabled = false;
+  } catch (e) { show('closed'); } // wrong or missing code looks the same as "closed"
+}
+init();
 
 function show(id) { for (const s of ['welcome', 'closed', 'queue']) $(s).classList.toggle('hidden', s !== id); }
 
@@ -87,9 +86,7 @@ $('file').onchange = async () => {
   let files = [...$('file').files];
   $('file').value = '';
   if (!files.length) return;
-  try {
-    if (!client) client = Uploader.createClient({ credential: await loadCredential(), folderId: CONFIG.folderId, eventName: CONFIG.eventName });
-  } catch (e) { show('closed'); return; }
+  if (!client) { show('closed'); return; }
 
   const warn = $('warn');
   warn.classList.toggle('hidden', files.length <= Uploader.MAX_FILES);
