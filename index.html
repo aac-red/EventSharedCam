@@ -1,0 +1,158 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>Upload PoC</title>
+<style>
+  body{font:15px/1.4 -apple-system,system-ui,sans-serif;margin:0;padding:14px;max-width:640px;margin-inline:auto;background:#fff8e7;color:#4a2c17}
+  h1{font-size:20px;margin:0 0 4px} h2{font-size:15px;margin:18px 0 6px}
+  textarea,input[type=text],select{width:100%;box-sizing:border-box;font:13px monospace;padding:8px;border:1px solid #c9b48a;border-radius:6px;background:#fff}
+  textarea{height:90px}
+  button{font:600 15px system-ui;padding:10px 14px;margin:6px 6px 0 0;border:0;border-radius:8px;background:#0b5fa5;color:#fff}
+  button:disabled{opacity:.4}
+  progress{width:100%;height:14px}
+  #log{white-space:pre-wrap;word-break:break-word;font:12px/1.35 monospace;background:#fff;border:1px solid #c9b48a;border-radius:6px;padding:8px;margin-top:10px;max-height:50vh;overflow:auto}
+  .note{font-size:12px;opacity:.8}
+</style>
+</head>
+<body>
+<h1>Credential proof of concept</h1>
+<p class="note">Test page only. Nothing is stored; the key lives in this tab's memory until you close it. Never commit a key into this file.</p>
+
+<h2>1. Inputs</h2>
+<textarea id="key" placeholder="Paste the whole service account JSON key here"></textarea>
+<input type="text" id="folder" placeholder="Event folder ID (inside the Shared Drive)" style="margin-top:6px">
+<select id="scope" style="margin-top:6px">
+  <option value="https://www.googleapis.com/auth/drive.file">Scope: drive.file (try first)</option>
+  <option value="https://www.googleapis.com/auth/drive">Scope: drive (fallback)</option>
+</select>
+
+<h2>2. Token</h2>
+<button id="bTok">Get token</button>
+
+<h2>3. What can this account see?</h2>
+<button id="bSee" disabled>Check folder and list files</button>
+
+<h2>4. Upload test</h2>
+<input type="file" id="file" accept="image/*,video/*">
+<button id="bUp" disabled>Upload (8 MiB chunks)</button>
+<progress id="prog" value="0" max="100"></progress>
+
+<h2>5. What can it do to the uploaded file?</h2>
+<button id="bDl" disabled>Try download</button>
+<button id="bDel" disabled>Try delete test file</button>
+
+<div id="log"></div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const CHUNK = 8 * 1024 * 1024;
+let token = null, tokenExp = 0, lastId = null;
+
+function log(m){ const t=new Date().toLocaleTimeString(); $('log').textContent += `[${t}] ${m}\n`; $('log').scrollTop = 1e9; }
+const b64url = (buf) => btoa(String.fromCharCode(...new Uint8Array(buf))).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');
+
+async function getToken(){
+  const key = JSON.parse($('key').value);
+  const now = Math.floor(Date.now()/1000);
+  const enc = (o) => b64url(new TextEncoder().encode(JSON.stringify(o)));
+  const unsigned = enc({alg:'RS256',typ:'JWT'}) + '.' + enc({
+    iss: key.client_email, scope: $('scope').value,
+    aud: 'https://oauth2.googleapis.com/token', iat: now, exp: now + 3600
+  });
+  const der = Uint8Array.from(atob(key.private_key.replace(/-----[^-]+-----/g,'').replace(/\s+/g,'')), c => c.charCodeAt(0));
+  const ck = await crypto.subtle.importKey('pkcs8', der, {name:'RSASSA-PKCS1-v1_5', hash:'SHA-256'}, false, ['sign']);
+  const sig = await crypto.subtle.sign('RSASSA-PKCS1-v1_5', ck, new TextEncoder().encode(unsigned));
+  const r = await fetch('https://oauth2.googleapis.com/token', {
+    method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'},
+    body: new URLSearchParams({grant_type:'urn:ietf:params:oauth:grant-type:jwt-bearer', assertion: unsigned + '.' + b64url(sig)})
+  });
+  const j = await r.json();
+  if(!r.ok) throw new Error(`token ${r.status}: ${JSON.stringify(j)}`);
+  token = j.access_token; tokenExp = Date.now() + j.expires_in*1000;
+  return j;
+}
+const auth = () => ({Authorization: 'Bearer ' + token});
+
+$('bTok').onclick = async () => {
+  try {
+    log('Origin: ' + location.origin);
+    const j = await getToken();
+    log(`TOKEN OK (scope ${$('scope').value.split('/').pop()}, expires in ${j.expires_in}s)`);
+    $('bSee').disabled = $('bUp').disabled = false;
+  } catch(e){ log('TOKEN FAILED: ' + e.message); }
+};
+
+$('bSee').onclick = async () => {
+  const f = $('folder').value.trim();
+  try {
+    let r = await fetch(`https://www.googleapis.com/drive/v3/files/${f}?supportsAllDrives=true&fields=id,name,mimeType,capabilities(canAddChildren,canListChildren,canDownload,canDelete,canEdit)`, {headers:auth()});
+    log(`Folder metadata ${r.status}: ${await r.text()}`);
+    r = await fetch(`https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(`'${f}' in parents and trashed=false`)}&supportsAllDrives=true&includeItemsFromAllDrives=true&pageSize=10&fields=files(id,name)`, {headers:auth()});
+    log(`List folder ${r.status}: ${await r.text()}`);
+    r = await fetch(`https://www.googleapis.com/drive/v3/files?pageSize=5&supportsAllDrives=true&includeItemsFromAllDrives=true&corpora=allDrives&fields=files(id,name)`, {headers:auth()});
+    log(`List ANYTHING it can reach (should be only the event drive) ${r.status}: ${await r.text()}`);
+  } catch(e){ log('CHECK FAILED: ' + e.message); }
+};
+
+function putChunk(url, blob, start, total){
+  return new Promise((resolve, reject) => {
+    const end = start + blob.size - 1;
+    const x = new XMLHttpRequest();
+    x.open('PUT', url);
+    x.setRequestHeader('Content-Range', `bytes ${start}-${end}/${total}`);
+    x.upload.onprogress = (e) => { if(e.lengthComputable) $('prog').value = Math.round((start + e.loaded) / total * 100); };
+    x.onload = () => resolve({status:x.status, range:x.getResponseHeader('Range'), text:x.responseText});
+    x.onerror = () => reject(new Error('network/CORS error on chunk at ' + start));
+    x.send(blob);
+  });
+}
+
+$('bUp').onclick = async () => {
+  const file = $('file').files[0];
+  if(!file){ log('Pick a file first.'); return; }
+  try {
+    if(Date.now() > tokenExp - 60000){ await getToken(); log('Token refreshed.'); }
+    const ext = (file.name.split('.').pop() || 'bin').toLowerCase();
+    const name = `poc_${Date.now()}.${ext}`;
+    const init = await fetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable&supportsAllDrives=true&fields=id', {
+      method:'POST',
+      headers:{...auth(), 'Content-Type':'application/json; charset=UTF-8', 'X-Upload-Content-Length': String(file.size)},
+      body: JSON.stringify({name, parents:[$('folder').value.trim()]})
+    });
+    log(`Session start ${init.status}`);
+    const url = init.headers.get('Location');
+    if(!url){ log('NO Location header readable from the browser. ' + await init.text()); return; }
+    log('Session URL readable by the browser: YES');
+    log(`Uploading ${name} (${(file.size/1048576).toFixed(1)} MB)`);
+    let off = 0, res;
+    while(off < file.size){
+      const blob = file.slice(off, Math.min(off + CHUNK, file.size));
+      res = await putChunk(url, blob, off, file.size);
+      if(res.status === 308){
+        log(`chunk ok, 308, Range header: ${res.range}`);
+        off = res.range ? parseInt(res.range.split('-')[1], 10) + 1 : off + blob.size;
+      } else if(res.status === 200 || res.status === 201){
+        off = file.size;
+      } else { throw new Error(`chunk status ${res.status}: ${res.text}`); }
+    }
+    lastId = JSON.parse(res.text).id;
+    $('prog').value = 100;
+    log(`UPLOAD DONE. File id ${lastId}. Check the folder in Drive.`);
+    $('bDl').disabled = $('bDel').disabled = false;
+  } catch(e){ log('UPLOAD FAILED: ' + e.message); }
+};
+
+$('bDl').onclick = async () => {
+  const r = await fetch(`https://www.googleapis.com/drive/v3/files/${lastId}?alt=media&supportsAllDrives=true`, {headers:{...auth(), Range:'bytes=0-15'}});
+  log(`Download attempt: ${r.status} (200/206 = it can read uploaded files back)`);
+};
+$('bDel').onclick = async () => {
+  const r = await fetch(`https://www.googleapis.com/drive/v3/files/${lastId}?supportsAllDrives=true`, {method:'DELETE', headers:auth()});
+  log(`Delete attempt: ${r.status} (204 = it CAN delete; 403 = blocked). This removed only the test file if it worked.`);
+};
+</script>
+</body>
+</html>
