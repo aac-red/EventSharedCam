@@ -141,7 +141,7 @@ function updateCounter() {
   const failed = valid.filter((i) => i.state === 'failed').length;
   const finished = !running && valid.every((i) => i.state === 'done' || i.state === 'failed');
   let t = `${done} of ${valid.length} uploaded`;
-  if (finished && !failed && valid.length) t = 'Upload complete! Prost!';
+  if (finished && !failed && valid.length) t = 'Upload complete!';
   else if (finished && failed) t += `, ${failed} failed`;
   $('counter').textContent = t;
   $('more').classList.toggle('hidden', !finished);
